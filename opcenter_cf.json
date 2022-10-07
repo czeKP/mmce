@@ -1,0 +1,282 @@
+{
+	"AWSTemplateFormatVersion": "2010-09-09",
+	"Parameters": {
+		"mvOpCenterInstanceType": {
+			"Description": "Amazon EC2 Instance type for OpCenter Instance",
+			"Type": "String",
+			"Default": "t2.medium"
+		},
+		"mvFloatKeyName": {
+			"Description": "Amazon EC2 Key Pair for Float Instance",
+			"Type": "AWS::EC2::KeyPair::KeyName"
+		},
+		"mvDataVolumeSize": {
+			"Description": "Size (GB) of New Data Volume to Create, which will be Used in OpCenter",
+			"Default": "64",
+			"Type": "String"
+		},
+		"mvRootVolumeSize": {
+			"Description": "Root Volume Size (GB) in OpCenter Instance",
+			"Default": "32",
+			"Type": "String"
+		},
+		"mvAvailabilityZone": {
+			"Description": "Availability zone to create OpCenter",
+			"Type": "AWS::EC2::AvailabilityZone::Name"
+		},
+		"mvSchedulerType": {
+			"Description": "Job Scheduler to Use",
+			"Type": "String",
+			"Default": "builtin",
+			"AllowedValues": [
+				"slurm",
+				"builtin"
+			]
+		},
+		"mvImageCachePathOption": {
+			"Description": "Path to cache container images.",
+			"Type": "String",
+			"Default": "use NFS folder",
+			"AllowedValues": [
+				"use NFS folder",
+				"use existing S3 bucket",
+				"create new S3 bucket"
+			]
+		},
+		"mvS3BucketName": {
+			"Description": "Existing S3 Bucket Name or New S3 Bucket Name to Create, which will be Used in Float",
+			"Type": "String"
+		},
+		"mvFloatAMIID": {
+			"Description": "MemVerge Float AMI ID",
+			"Type": "AWS::EC2::Image::Id"
+		}
+	},
+	"Conditions": {
+		"createS3CacheFolder": {
+			"Fn::And": [
+				{
+					"Fn::Equals": [
+						{
+							"Ref": "mvImageCachePathOption"
+						},
+						"create new S3 bucket"
+					]
+				},
+				{
+					"Fn::Not": [
+						{
+							"Fn::Equals": [
+								{
+									"Ref": "mvS3BucketName"
+								},
+								""
+							]
+						}
+					]
+				}
+			]
+		}
+	},
+	"Resources": {
+		"mvOpCenterPolicy": {
+			"Type": "AWS::IAM::Policy",
+			"Properties": {
+				"PolicyName": "root",
+				"PolicyDocument": {
+					"Version": "2012-10-17",
+					"Statement": [
+						{
+							"Effect": "Allow",
+							"Action": [
+								"license-manager:*",
+								"ec2:*",
+								"s3:*",
+								"iam:GetRole",
+								"iam:PassRole",
+								"iam:AttachRolePolicy",
+								"iam:CreateRole",
+								"iam:PutRolePolicy",
+								"iam:CreateServiceLinkedRole"
+							],
+							"Resource": "*"
+						}
+					]
+				},
+				"Roles": [
+					{
+						"Ref": "mvOpCenterRole"
+					}
+				]
+			}
+		},
+		"mvOpCenterRole": {
+			"Type": "AWS::IAM::Role",
+			"Properties": {
+				"AssumeRolePolicyDocument": {
+					"Version": "2012-10-17",
+					"Statement": [
+						{
+							"Effect": "Allow",
+							"Principal": {
+								"Service": [
+									"ec2.amazonaws.com"
+								]
+							},
+							"Action": [
+								"sts:AssumeRole"
+							]
+						}
+					]
+				},
+				"Path": "/"
+			}
+		},
+		"mvOpCenterInstanceProfile": {
+			"Type": "AWS::IAM::InstanceProfile",
+			"Properties": {
+				"Path": "/",
+				"Roles": [
+					{
+						"Ref": "mvOpCenterRole"
+					}
+				]
+			}
+		},
+		"mvOpCenter": {
+			"Type": "AWS::EC2::Instance",
+			"Properties": {
+				"BlockDeviceMappings": [
+					{
+						"DeviceName": "/dev/sda1",
+						"Ebs": {
+							"VolumeSize": {
+								"Ref": "mvRootVolumeSize"
+							},
+							"DeleteOnTermination": true
+						}
+					}
+				],
+				"KeyName": {
+					"Ref": "mvFloatKeyName"
+				},
+				"ImageId": {
+					"Ref": "mvFloatAMIID"
+				},
+				"AvailabilityZone": {
+					"Ref": "mvAvailabilityZone"
+				},
+				"InstanceType": {
+					"Ref": "mvOpCenterInstanceType"
+				},
+				"Monitoring": "true",
+				"Tags": [
+					{
+						"Key": "Name",
+						"Value": "OpCenter"
+					}
+				],
+				"SecurityGroups": [
+					{
+						"Ref": "mvOpCenterSecurityGroup"
+					}
+				],
+				"DisableApiTermination": "false",
+				"IamInstanceProfile": {
+					"Ref": "mvOpCenterInstanceProfile"
+				},
+				"UserData": {
+					"Fn::Base64": {
+						"Fn::Join": [
+							"",
+							[
+								"#!/bin/bash\n",
+								"opcenter_init=/opt/memverge/sbin/opcenter_init.sh\n",
+								"volID=",
+								{
+									"Ref": "mvDataVolume"
+								},
+								"\n",
+								"skdType=",
+								{
+									"Ref": "mvSchedulerType"
+								},
+								"\n",
+								"s3Bucket='",
+								{
+									"Ref": "mvS3BucketName"
+								},
+								"'\n",
+								"cacheOption='",
+								{
+									"Ref": "mvImageCachePathOption"
+								},
+								"'\n",
+								"if [[ ! -z $volID ]]; then\n",
+								"   if [[ $cacheOption == 'use NFS folder' ]]; then\n",
+								"      $opcenter_init -v $volID -p /mnt/memverge -s $skdType\n",
+								"   else\n",
+								"      $opcenter_init -v $volID -p /mnt/memverge -s $skdType -b $s3Bucket\n",
+								"   fi\n",
+								"fi\n"
+							]
+						]
+					}
+				}
+			}
+		},
+		"mvOpCenterSecurityGroup": {
+			"Type": "AWS::EC2::SecurityGroup",
+			"Properties": {
+				"GroupDescription": "Enable HTTP access via port 443 + SSH access for OpCenter",
+				"SecurityGroupIngress": [
+					{
+						"IpProtocol": "tcp",
+						"FromPort": 443,
+						"ToPort": 443,
+						"CidrIp": "0.0.0.0/0"
+					},
+					{
+						"IpProtocol": "tcp",
+						"FromPort": 22,
+						"ToPort": 22,
+						"CidrIp": "0.0.0.0/0"
+					},
+					{
+						"IpProtocol": "tcp",
+						"FromPort": 2049,
+						"ToPort": 2049,
+						"CidrIp": "0.0.0.0/0"
+					},
+					{
+						"IpProtocol": "tcp",
+						"FromPort": 6817,
+						"ToPort": 6830,
+						"CidrIp": "0.0.0.0/0"
+					}
+				]
+			}
+		},
+		"mvS3CacheFolder": {
+			"Condition": "createS3CacheFolder",
+			"Type": "AWS::S3::Bucket",
+			"DeletionPolicy": "Delete",
+			"Properties": {
+				"BucketName": {
+					"Ref": "mvS3BucketName"
+				}
+			}
+		},
+		"mvDataVolume": {
+			"Type": "AWS::EC2::Volume",
+			"Properties": {
+				"AvailabilityZone": {
+					"Ref": "mvAvailabilityZone"
+				},
+				"Size": {
+					"Ref": "mvDataVolumeSize"
+				}
+			}
+		}
+	}
+}
